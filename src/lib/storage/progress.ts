@@ -1,71 +1,15 @@
-/**
- * Progress store (Phase 1 foundation).
- *
- * Persisted to LocalStorage via Zustand's persist middleware under a versioned,
- * namespaced key. This is intentionally lightweight: it defines the SHAPE of
- * progress and a few basic actions. The full spaced-repetition (SM-2) logic and
- * per-skill scoring land in Phase 2 — but the storage contract is set now, with
- * a version field and JSON export/import so a future migration (or a cleared
- * browser cache) never silently destroys a real learner's history.
- */
-import { create } from "zustand";
-import { persist } from "zustand/middleware";
-import type { Skill } from "../content/schema";
-import { review, initialCard, type SrsCard, type Rating } from "../srs/sm2";
-
-/** Build the stable per-vocab key used in the SRS map. */
-export function vocabKey(unitId: string, vocabId: string): string {
-  return `${unitId}::${vocabId}`;
+import { create } from 'zustand';
+import type { Skill } from '../content/schema';
+import type { Rating } from '../srs/sm2';
+import { emptyProgress, snapshotSchema, type ProgressData, type Operation, type ExamResult } from '../cloud/model';
+export type { UnitProgress, UnitStatus, ExamResult } from '../cloud/model';
+export function vocabKey(unitId: string, vocabId: string) { return `${unitId}::${vocabId}`; }
+let writer: ((operation: Operation) => void) | null = null;
+export function setProgressWriter(next: typeof writer) { writer = next; }
+function write(operation: Operation) {
+  if (!writer) throw new Error('Your progress is still loading. Please wait and try again.');
+  writer(operation);
 }
-
-export type UnitStatus = "not-started" | "in-progress" | "completed";
-
-export interface UnitProgress {
-  status: UnitStatus;
-  bestScore: number; // 0..1 on the mini-test
-  lastVisitedISO: string | null;
-}
-
-const STORAGE_KEY = "florine:progress";
-const STORAGE_VERSION = 1;
-const DEFAULT_PASS = 0.7;
-
-function emptySkillXp(): Record<Skill, number> {
-  return { reading: 0, listening: 0, writing: 0, speaking: 0 };
-}
-
-const emptyUnit: UnitProgress = {
-  status: "not-started",
-  bestScore: 0,
-  lastVisitedISO: null,
-};
-
-/** Best result on a mock exam paper, keyed by exam id. */
-export interface ExamResult {
-  /** Auto-graded points earned (CO + CE) on the best attempt. */
-  autoPoints: number;
-  /** Total auto-gradable points available across CO + CE. */
-  autoMax: number;
-  /** Self-assessed production points (PE + PO) on the best attempt, or null. */
-  selfPoints: number | null;
-  /** Total /100 (auto + self) when production was self-graded, else null. */
-  total: number | null;
-  passed: boolean | null; // null until production self-graded
-  attempts: number;
-  lastAttemptISO: string;
-}
-
-interface ProgressData {
-  version: number;
-  unitProgress: Record<string, UnitProgress>; // keyed by unit id
-  skillXp: Record<Skill, number>;
-  totalStudyMinutes: number;
-  streakDays: number;
-  lastStudyDate: string | null; // ISO yyyy-mm-dd
-  vocab: Record<string, SrsCard>; // SRS cards, keyed by vocabKey()
-  examResults: Record<string, ExamResult>; // best result per exam id
-}
-
 interface ProgressActions {
   markVisited: (unitId: string) => void;
   recordScore: (unitId: string, score: number) => void;
@@ -75,149 +19,29 @@ interface ProgressActions {
   addSkillXp: (skill: Skill, n: number) => void;
   touchStreak: () => void;
   reviewVocab: (key: string, rating: Rating) => void;
-  /** Add a card to the learner's personal review deck (due immediately). */
   addVocabCard: (key: string) => void;
-  /** Remove a card from the review deck (it stops counting as due). */
   removeVocabCard: (key: string) => void;
-  /** Record a finished mock-exam attempt (keeps the best by total, else by auto). */
-  recordExamResult: (examId: string, r: Omit<ExamResult, "attempts" | "lastAttemptISO">) => void;
+  recordExamResult: (examId: string, r: Omit<ExamResult, 'attempts' | 'lastAttemptISO'>) => void;
   resetAll: () => void;
 }
-
 export type ProgressState = ProgressData & ProgressActions;
-
-const initialData: ProgressData = {
-  version: STORAGE_VERSION,
-  unitProgress: {},
-  skillXp: emptySkillXp(),
-  totalStudyMinutes: 0,
-  streakDays: 0,
-  lastStudyDate: null,
-  vocab: {},
-  examResults: {},
-};
-
-export const useProgress = create<ProgressState>()(
-  persist(
-    (set, get) => ({
-      ...initialData,
-
-      markVisited: (unitId) =>
-        set((s) => {
-          const cur = s.unitProgress[unitId] ?? emptyUnit;
-          return {
-            unitProgress: {
-              ...s.unitProgress,
-              [unitId]: {
-                ...cur,
-                status: cur.status === "completed" ? "completed" : "in-progress",
-                lastVisitedISO: new Date().toISOString(),
-              },
-            },
-          };
-        }),
-
-      recordScore: (unitId, score) =>
-        set((s) => {
-          const cur = s.unitProgress[unitId] ?? emptyUnit;
-          const bestScore = Math.max(cur.bestScore, score);
-          return {
-            unitProgress: {
-              ...s.unitProgress,
-              [unitId]: {
-                ...cur,
-                bestScore,
-                status: bestScore >= DEFAULT_PASS ? "completed" : "in-progress",
-              },
-            },
-          };
-        }),
-
-      addStudyMinutes: (mins) =>
-        set((s) => ({ totalStudyMinutes: s.totalStudyMinutes + mins })),
-
-      exportJSON: () => {
-        const s = get();
-        const data: ProgressData = {
-          version: s.version,
-          unitProgress: s.unitProgress,
-          skillXp: s.skillXp,
-          totalStudyMinutes: s.totalStudyMinutes,
-          streakDays: s.streakDays,
-          lastStudyDate: s.lastStudyDate,
-          vocab: s.vocab,
-          examResults: s.examResults,
-        };
-        return JSON.stringify(data, null, 2);
-      },
-
-      importJSON: (json) => {
-        try {
-          const data = JSON.parse(json) as Partial<ProgressData>;
-          if (typeof data !== "object" || data === null) return false;
-          set({
-            unitProgress: data.unitProgress ?? {},
-            skillXp: data.skillXp ?? emptySkillXp(),
-            totalStudyMinutes: data.totalStudyMinutes ?? 0,
-            streakDays: data.streakDays ?? 0,
-            lastStudyDate: data.lastStudyDate ?? null,
-            vocab: data.vocab ?? {},
-            examResults: data.examResults ?? {},
-          });
-          return true;
-        } catch {
-          return false;
-        }
-      },
-
-      addSkillXp: (skill, n) =>
-        set((s) => ({ skillXp: { ...s.skillXp, [skill]: s.skillXp[skill] + n } })),
-
-      touchStreak: () =>
-        set((s) => {
-          const today = new Date().toISOString().slice(0, 10);
-          if (s.lastStudyDate === today) return {};
-          const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-          const streakDays = s.lastStudyDate === yesterday ? s.streakDays + 1 : 1;
-          return { streakDays, lastStudyDate: today };
-        }),
-
-      reviewVocab: (key, rating) =>
-        set((s) => ({
-          vocab: { ...s.vocab, [key]: review(s.vocab[key] ?? initialCard(), rating) },
-        })),
-
-      addVocabCard: (key) =>
-        set((s) => (s.vocab[key] ? {} : { vocab: { ...s.vocab, [key]: initialCard() } })),
-
-      removeVocabCard: (key) =>
-        set((s) => {
-          if (!s.vocab[key]) return {};
-          const next = { ...s.vocab };
-          delete next[key];
-          return { vocab: next };
-        }),
-
-      recordExamResult: (examId, r) =>
-        set((s) => {
-          const prev = s.examResults[examId];
-          const prevBest = prev?.total ?? prev?.autoPoints ?? -1;
-          const newBest = r.total ?? r.autoPoints;
-          const attempts = (prev?.attempts ?? 0) + 1;
-          const lastAttemptISO = new Date().toISOString();
-          // Keep the better attempt's scores, but always bump attempts/time.
-          const best: ExamResult =
-            newBest >= prevBest
-              ? { ...r, attempts, lastAttemptISO }
-              : { ...prev!, attempts, lastAttemptISO };
-          return { examResults: { ...s.examResults, [examId]: best } };
-        }),
-
-      resetAll: () => set({ ...initialData }),
-    }),
-    {
-      name: STORAGE_KEY,
-      version: STORAGE_VERSION,
-    },
-  ),
-);
+export const useProgress = create<ProgressState>()((_set, get) => ({
+  ...emptyProgress(),
+  markVisited: unitId => write({ type: 'visit', unitId }),
+  recordScore: (unitId, score) => write({ type: 'score', unitId, score }),
+  addStudyMinutes: minutes => write({ type: 'minutes', minutes }),
+  exportJSON: () => JSON.stringify(snapshotSchema.parse(get()), null, 2),
+  importJSON: json => {
+    try { write({ type: 'import', snapshot: snapshotSchema.parse(JSON.parse(json)) }); return true; }
+    catch { return false; }
+  },
+  addSkillXp: (skill, amount) => write({ type: 'xp', skill, amount }),
+  touchStreak: () => {
+    if (get().lastStudyDate !== new Date().toISOString().slice(0, 10)) write({ type: 'study' });
+  },
+  reviewVocab: (key, rating) => write({ type: 'review', key, rating }),
+  addVocabCard: key => { if (!get().vocab[key]) write({ type: 'add', key }); },
+  removeVocabCard: key => write({ type: 'remove', key }),
+  recordExamResult: (examId, result) => write({ type: 'exam', examId, result }),
+  resetAll: () => write({ type: 'reset' }),
+}));
