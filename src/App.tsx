@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
+import AccountGate from "./components/auth/AccountGate";
 import Layout from "./components/Layout";
 import Home from "./pages/Home";
 import LevelSelect from "./pages/LevelSelect";
@@ -15,7 +16,7 @@ import NotFound from "./pages/NotFound";
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <AccountGate><BrowserRouter>
       <Routes>
         <Route element={<Layout />}>
           <Route index element={<Home />} />
@@ -32,6 +33,6 @@ export default function App() {
           <Route path="*" element={<NotFound />} />
         </Route>
       </Routes>
-    </BrowserRouter>
+    </BrowserRouter></AccountGate>
   );
 }

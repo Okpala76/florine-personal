@@ -1,3 +1,9 @@
+# Florine Personal
+
+Personal fork with email/password accounts and automatic progress syncing across devices. See [account and sync setup](docs/CLOUD_PROGRESS.md) for configuration, backup behavior, and verification. The original project's documentation and credits follow.
+
+---
+
 # Florine
 
 > Open-source, DELF/DALF-aligned French practice for self-learners — the full
